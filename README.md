@@ -18,5 +18,6 @@ NOTION_PAGE_ID=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 4. Install dependencies:
 ```bash
     pip install -r requirements.txt
+```
 5. Run:
     python notion_script.py
