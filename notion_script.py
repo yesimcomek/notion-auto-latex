@@ -79,6 +79,7 @@ SKIP_BLOCK_TYPES = {
     "child_database",
     "child_page",
     "breadcrumb",
+    "table_of_contents", # Does not support rich_text updates
 }
 
 MATH_PATTERN = re.compile(r"\$(.+?)\$", flags=re.DOTALL)  # non-greedy match between $...$
@@ -146,21 +147,33 @@ def build_rich_text_from_text_with_math(text: str):
         if start > idx:
             leading = text[idx:start]
             if leading:
-                rich.append({"type": "text", "text": {"content": leading}})
+                rich.append({
+                    "type": "text",
+                    "text": {"content": leading}
+                })
         expr = m.group(1).strip()
         expr = normalize_latex(expr)
-        # inline equation element
-        rich.append({"type": "equation", "equation": {"expression": expr}})
+        # inline equation element (no annotations field for equations)
+        rich.append({
+            "type": "equation",
+            "equation": {"expression": expr}
+        })
         idx = end
     # trailing plain text
     if idx < len(text):
         trailing = text[idx:]
         if trailing:
-            rich.append({"type": "text", "text": {"content": trailing}})
+            rich.append({
+                "type": "text",
+                "text": {"content": trailing}
+            })
 
-    # Edge case: if there were NO matches (shouldn’t happen), return as plain text
+    # Edge case: if there were NO matches (shouldn't happen), return as plain text
     if not rich:
-        return [{"type": "text", "text": {"content": text}}]
+        return [{
+            "type": "text",
+            "text": {"content": text}
+        }]
 
     return rich
 
@@ -171,39 +184,20 @@ def rewrite_block_inline_math(block):
      - for any 'text' piece containing $...$, split into text + equation items
      - keep existing annotations/links for plain text where possible (we’ll drop them on equation chunks)
     """
-    bt = block["type"]
-    old_rt = block[bt].get("rich_text", [])
-    new_rt = []
+    btype = block["type"]
+    old_rt = block[btype].get("rich_text", [])
+    
+    # [FIX] Flatten the entire rich_text array into a single string.
+    # This handles cases where a paragraph is composed of multiple rich_text objects
+    # with different styling, which was causing the 400 error.
+    full_text = "".join(item.get("plain_text", "") for item in old_rt)
 
-    changed = False
-    for item in old_rt:
-        if item["type"] != "text":
-            # keep mentions, equations (already fine), etc.
-            new_rt.append(item)
-            continue
-
-        content = item["text"]["content"]
-        if "$" in content and MATH_PATTERN.search(content):
-            changed = True
-            # Split this one text node into mixed nodes
-            mixed = build_rich_text_from_text_with_math(content)
-
-            # Try to preserve annotations/links for plain-text pieces only
-            ann = item.get("annotations", None)
-            link = item["text"].get("link")
-            for piece in mixed:
-                if piece["type"] == "text":
-                    if ann:
-                        piece["annotations"] = ann
-                    if link:
-                        piece["text"]["link"] = link
-                # equation chunks don’t support text annotations/links
-                new_rt.append(piece)
-        else:
-            new_rt.append(item)
-
+    # If the flattened text contains math, rebuild the entire rich_text array.
+    changed = "$" in full_text and MATH_PATTERN.search(full_text)
     if changed:
-        update_block_rich_text(block["id"], bt, new_rt)
+        new_rt = build_rich_text_from_text_with_math(full_text)
+        update_block_rich_text(block["id"], btype, new_rt)
+        
     return changed
 
 def walk_and_fix(block_id: str, depth=0):
@@ -228,9 +222,11 @@ def walk_and_fix(block_id: str, depth=0):
         try:
             if block_has_math_dollars(b):
                 if rewrite_block_inline_math(b):
+                    print(f"[INFO] Successfully updated block {b['id']}")
                     total_changed += 1
         except requests.HTTPError as e:
-            print(f"[WARN] Failed to update block {b['id']}: {e}")
+            print(f"[WARN] Failed to update block {b['id']} of type '{btype}'. Error: {e}")
+            print(f"[DEBUG] Block content: {b}")
 
         # Recurse if there are children
         if b.get("has_children"):
